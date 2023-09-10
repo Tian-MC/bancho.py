@@ -61,6 +61,7 @@ from app.objects.match import SlotStatus
 from app.objects.player import Player
 from app.objects.score import SubmissionStatus
 from app.repositories import clans as clans_repo
+from app.repositories import map_requests as map_requests_repo
 from app.repositories import maps as maps_repo
 from app.repositories import players as players_repo
 from app.usecases.performance import ScoreParams
@@ -548,12 +549,7 @@ async def request(ctx: Context) -> Optional[str]:
     if bmap.status != RankedStatus.Pending:
         return "Only pending maps may be requested for status change."
 
-    await app.state.services.database.execute(
-        "INSERT INTO map_requests "
-        "(map_id, player_id, datetime, active) "
-        "VALUES (:map_id, :user_id, NOW(), 1)",
-        {"map_id": bmap.id, "user_id": ctx.player.id},
-    )
+    await map_requests_repo.create(map_id=bmap.id, player_id=ctx.player.id, active=True)
 
     return "Request submitted."
 
@@ -589,16 +585,18 @@ async def requests(ctx: Context) -> Optional[str]:
     if ctx.args:
         return "Invalid syntax: !requests"
 
-    rows = await app.state.services.database.fetch_all(
-        "SELECT map_id, player_id, datetime FROM map_requests WHERE active = 1",
-    )
+    rows = await map_requests_repo.fetch_all(active=True)
 
     if not rows:
         return "The queue is clean! (0 map request(s))"
 
     l = [f"Total requests: {len(rows)}"]
 
-    for map_id, player_id, dt in rows:
+    for row in rows:
+        map_id = row["map_id"]
+        player_id = row["player_id"]
+        datetime = row["datetime"]
+
         # find player & map for each row, and add to output.
         player = await app.state.sessions.players.from_cache_or_sql(id=player_id)
         if not player:
@@ -610,7 +608,7 @@ async def requests(ctx: Context) -> Optional[str]:
             l.append(f"Failed to find requested map ({map_id})?")
             continue
 
-        l.append(f"[{player.embed} @ {dt:%b %d %I:%M%p}] {bmap.embed}.")
+        l.append(f"[{player.embed} @ {datetime:%b %d %I:%M%p}] {bmap.embed}.")
 
     return "\n".join(l)
 
@@ -679,10 +677,7 @@ async def _map(ctx: Context) -> Optional[str]:
                 app.state.cache.beatmap[bmap.md5].status = new_status
 
         # deactivate rank requests for all ids
-        await db_conn.execute(
-            "UPDATE map_requests SET active = 0 WHERE map_id IN :map_ids",
-            {"map_ids": map_ids},
-        )
+        await map_requests_repo.update(active=False, map_ids=map_ids)
 
     return f"{bmap.embed} updated to {new_status!s}."
 
