@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from dataclasses import dataclass
@@ -9,10 +10,9 @@ from enum import IntEnum
 from enum import unique
 from functools import cached_property
 from typing import Any
-from typing import Optional
+from typing import cast
 from typing import TYPE_CHECKING
 from typing import TypedDict
-from typing import Union
 
 import databases.core
 
@@ -38,7 +38,6 @@ from app.objects.menu import menu_keygen
 from app.objects.menu import MenuCommands
 from app.objects.menu import MenuFunction
 from app.objects.score import Grade
-from app.objects.score import Score
 from app.repositories import stats as stats_repo
 from app.utils import escape_enum
 from app.utils import make_safe_name
@@ -48,6 +47,7 @@ if TYPE_CHECKING:
     from app.objects.achievement import Achievement
     from app.objects.beatmap import Beatmap
     from app.objects.clan import Clan
+    from app.objects.score import Score
     from app.constants.privileges import ClanPrivileges
 
 __all__ = ("ModeData", "Status", "Player")
@@ -162,7 +162,7 @@ class OsuVersion:
     def __init__(
         self,
         date: date,
-        revision: Optional[int],  # TODO: should this be optional?
+        revision: int | None,  # TODO: should this be optional?
         stream: OsuStream,
     ) -> None:
         self.date = date
@@ -241,7 +241,7 @@ class Player:
         self,
         id: int,
         name: str,
-        priv: Union[int, Privileges],
+        priv: int | Privileges,
         **extras: Any,
     ) -> None:
         self.id = id
@@ -249,13 +249,13 @@ class Player:
         self.safe_name = self.make_safe(self.name)
 
         if "pw_bcrypt" in extras:
-            self.pw_bcrypt: Optional[bytes] = extras["pw_bcrypt"]
+            self.pw_bcrypt: bytes | None = extras["pw_bcrypt"]
         else:
             self.pw_bcrypt = None
 
         # generate a token if not given
         token = extras.get("token", None)
-        if token is not None:
+        if token is not None and isinstance(token, str):
             self.token = token
         else:
             self.token = self.generate_token()
@@ -272,12 +272,12 @@ class Player:
 
         self.channels: list[Channel] = []
         self.spectators: list[Player] = []
-        self.spectating: Optional[Player] = None
-        self.match: Optional[Match] = None
+        self.spectating: Player | None = None
+        self.match: Match | None = None
         self.stealth = False
 
-        self.clan: Optional[Clan] = extras.get("clan")
-        self.clan_priv: Optional[ClanPrivileges] = extras.get("clan_priv")
+        self.clan: Clan | None = extras.get("clan")
+        self.clan_priv: ClanPrivileges | None = extras.get("clan_priv")
 
         self.achievements: set[Achievement] = set()
 
@@ -292,12 +292,12 @@ class Player:
 
         self.utc_offset = extras.get("utc_offset", 0)
         self.pm_private = extras.get("pm_private", False)
-        self.away_msg: Optional[str] = None
+        self.away_msg: str | None = None
         self.silence_end = extras.get("silence_end", 0)
         self.donor_end = extras.get("donor_end", 0)
         self.in_lobby = False
 
-        self.client_details: Optional[ClientDetails] = extras.get("client_details")
+        self.client_details: ClientDetails | None = extras.get("client_details")
         self.pres_filter = PresenceFilter.Nil
 
         login_time = extras.get("login_time", 0.0)
@@ -307,12 +307,12 @@ class Player:
         # XXX: below is mostly implementation-specific & internal stuff
 
         # store most recent score for each gamemode.
-        self.recent_scores: dict[GameMode, Optional[Score]] = {
+        self.recent_scores: dict[GameMode, Score | None] = {
             mode: None for mode in GameMode
         }
 
         # store the last beatmap /np'ed by the user.
-        self.last_np: Optional[LastNp] = None
+        self.last_np: LastNp | None = None
 
         # TODO: document
         self.current_menu = MAIN_MENU
@@ -336,7 +336,7 @@ class Player:
         return f"<{self.name} ({self.id})>"
 
     @property
-    def online(self) -> bool:
+    def is_online(self) -> bool:
         return self.token != ""
 
     @property
@@ -401,7 +401,7 @@ class Player:
         return self.stats[self.status.mode]
 
     @property
-    def recent_score(self) -> Optional[Score]:
+    def recent_score(self) -> Score | None:
         """The player's most recently submitted score."""
         score = None
         for s in self.recent_scores.values():
@@ -481,7 +481,7 @@ class Player:
         if "bancho_priv" in self.__dict__:
             del self.bancho_priv  # wipe cached_property
 
-        if self.online:
+        if self.is_online:
             # if they're online, send a packet
             # to update their client-side privileges
             self.enqueue(app.packets.bancho_privileges(self.bancho_priv))
@@ -498,7 +498,7 @@ class Player:
         if "bancho_priv" in self.__dict__:
             del self.bancho_priv  # wipe cached_property
 
-        if self.online:
+        if self.is_online:
             # if they're online, send a packet
             # to update their client-side privileges
             self.enqueue(app.packets.bancho_privileges(self.bancho_priv))
@@ -531,10 +531,10 @@ class Player:
         webhook_url = app.settings.DISCORD_AUDIT_LOG_WEBHOOK
         if webhook_url:
             webhook = Webhook(webhook_url, content=log_msg)
-            await webhook.post(app.state.services.http_client)
+            asyncio.create_task(webhook.post())
 
         # refresh their client state
-        if self.online:
+        if self.is_online:
             self.logout()
 
     async def unrestrict(self, admin: Player, reason: str) -> None:
@@ -548,7 +548,7 @@ class Player:
             {"from": admin.id, "to": self.id, "action": "unrestrict", "msg": reason},
         )
 
-        if not self.online:
+        if not self.is_online:
             async with app.state.services.database.connection() as db_conn:
                 await self.stats_from_sql_full(db_conn)
 
@@ -569,9 +569,9 @@ class Player:
         webhook_url = app.settings.DISCORD_AUDIT_LOG_WEBHOOK
         if webhook_url:
             webhook = Webhook(webhook_url, content=log_msg)
-            await webhook.post(app.state.services.http_client)
+            asyncio.create_task(webhook.post())
 
-        if self.online:
+        if self.is_online:
             # log the user out if they're offline, this
             # will simply relog them and refresh their app.state
             self.logout()
@@ -660,7 +660,7 @@ class Player:
             log(f"{self} failed to join {match.chat}.", Ansi.LYELLOW)
             return False
 
-        lobby = app.state.sessions.channels["#lobby"]
+        lobby = app.state.sessions.channels.get_by_name("#lobby")
         if lobby in self.channels:
             self.leave_channel(lobby)
 
@@ -715,7 +715,7 @@ class Player:
 
             app.state.sessions.matches.remove(self.match)
 
-            lobby = app.state.sessions.channels["#lobby"]
+            lobby = app.state.sessions.channels.get_by_name("#lobby")
             if lobby:
                 lobby.enqueue(app.packets.dispose_match(self.match.id))
 
@@ -830,7 +830,7 @@ class Player:
         """Attempt to add `player` to `self`'s spectators."""
         chan_name = f"#spec_{self.id}"
 
-        spec_chan = app.state.sessions.channels[chan_name]
+        spec_chan = app.state.sessions.channels.get_by_name(chan_name)
         if not spec_chan:
             # spectator chan doesn't exist, create it.
             spec_chan = Channel(
@@ -871,7 +871,9 @@ class Player:
         self.spectators.remove(player)
         player.spectating = None
 
-        channel = app.state.sessions.channels[f"#spec_{self.id}"]
+        channel = app.state.sessions.channels.get_by_name(f"#spec_{self.id}")
+        assert channel is not None
+
         player.leave_channel(channel)
 
         if not self.spectators:
@@ -1005,7 +1007,7 @@ class Player:
             f"bancho:leaderboard:{mode.value}",
             str(self.id),
         )
-        return rank + 1 if rank is not None else 0
+        return cast(int, rank) + 1 if rank is not None else 0
 
     async def get_country_rank(self, mode: GameMode) -> int:
         if self.restricted:
@@ -1017,7 +1019,7 @@ class Player:
             str(self.id),
         )
 
-        return rank + 1 if rank is not None else 0
+        return cast(int, rank) + 1 if rank is not None else 0
 
     async def update_rank(self, mode: GameMode) -> int:
         country = self.geoloc["country"]["acronym"]
@@ -1099,7 +1101,7 @@ class Player:
         """Add data to be sent to the client."""
         self._queue += data
 
-    def dequeue(self) -> Optional[bytes]:
+    def dequeue(self) -> bytes | None:
         """Get data from the queue to send to the client."""
         if self._queue:
             data = bytes(self._queue)
@@ -1108,7 +1110,7 @@ class Player:
 
         return None
 
-    def send(self, msg: str, sender: Player, chan: Optional[Channel] = None) -> None:
+    def send(self, msg: str, sender: Player, chan: Channel | None = None) -> None:
         """Enqueue `sender`'s `msg` to `self`. Sent in `chan`, or dm."""
         self.enqueue(
             app.packets.send_message(

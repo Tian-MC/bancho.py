@@ -1,4 +1,4 @@
-# #!/usr/bin/env python3.9
+# #!/usr/bin/env python3.11
 from __future__ import annotations
 
 import asyncio
@@ -6,8 +6,6 @@ import os
 import pprint
 from typing import Any
 
-import aiohttp
-import orjson
 import starlette.routing
 from fastapi import FastAPI
 from fastapi import status
@@ -24,7 +22,7 @@ import app.bg_loops
 import app.settings
 import app.state
 import app.utils
-from app.api import api_router
+from app.api import api_router  # type: ignore[attr-defined]
 from app.api import domains
 from app.api import middlewares
 from app.logging import Ansi
@@ -125,9 +123,6 @@ def init_events(asgi_app: BanchoAPI) -> None:
                 Ansi.LRED,
             )
 
-        app.state.services.http_client = aiohttp.ClientSession(
-            json_serialize=lambda x: orjson.dumps(x).decode(),
-        )
         await app.state.services.database.connect()
         await app.state.services.redis.initialize()
 
@@ -158,7 +153,7 @@ def init_events(asgi_app: BanchoAPI) -> None:
 
         # shutdown services
 
-        await app.state.services.http_client.close()
+        await app.state.services.http_client.aclose()
         await app.state.services.database.disconnect()
         await app.state.services.redis.close()
 
