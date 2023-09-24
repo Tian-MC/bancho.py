@@ -36,14 +36,13 @@ from fastapi.responses import ORJSONResponse
 from fastapi.responses import RedirectResponse
 from fastapi.responses import Response
 from fastapi.routing import APIRouter
-from py3rijndael import Pkcs7Padding
-from py3rijndael import RijndaelCbc
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 import app.packets
 import app.settings
 import app.state
 import app.utils
+from app import encryption
 from app._typing import UNSET
 from app.constants import regexes
 from app.constants.clientflags import LastFMFlags
@@ -610,36 +609,7 @@ def parse_form_data_score_params(
         log(f"Failed to validate score multipart data: ({exc.args[0]})", Ansi.LRED)
         return None
     else:
-        return (
-            score_data_b64.encode(),
-            replay_file,
-        )
-
-
-def decrypt_score_aes_data(
-    # to decode
-    score_data_b64: bytes,
-    client_hash_b64: bytes,
-    # used for decoding
-    iv_b64: bytes,
-    osu_version: str,
-) -> tuple[list[str], str]:
-    """Decrypt the base64'ed score data."""
-    # TODO: perhaps this should return TypedDict?
-
-    # attempt to decrypt score data
-    aes = RijndaelCbc(
-        key=f"osu!-scoreburgr---------{osu_version}".encode(),
-        iv=b64decode(iv_b64),
-        padding=Pkcs7Padding(32),
-        block_size=32,
-    )
-
-    score_data = aes.decrypt(b64decode(score_data_b64)).decode().split(":")
-    client_hash_decoded = aes.decrypt(b64decode(client_hash_b64)).decode()
-
-    # score data is delimited by colons (:).
-    return score_data, client_hash_decoded
+        return (score_data_b64.encode(), replay_file)
 
 
 @router.post("/web/osu-submit-modular-selector.php")
@@ -683,7 +653,7 @@ async def osuSubmitModularSelector(
     score_data_b64, replay_file = score_parameters
 
     # decrypt the score data (aes)
-    score_data, client_hash_decoded = decrypt_score_aes_data(
+    score_data, client_hash_decoded = encryption.decrypt_score_aes_data(
         score_data_b64,
         client_hash_b64,
         iv_b64,
