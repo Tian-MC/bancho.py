@@ -1,34 +1,31 @@
 from __future__ import annotations
 
-import copy
 import importlib.metadata
 import os
 import pprint
 import random
 import secrets
 import signal
-import struct
 import time
 import traceback
 import uuid
 from collections import Counter
+from collections.abc import Awaitable
+from collections.abc import Callable
+from collections.abc import Mapping
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
 from time import perf_counter_ns as clock_ns
 from typing import Any
-from typing import Awaitable
-from typing import Callable
-from typing import Mapping
 from typing import NamedTuple
 from typing import NoReturn
 from typing import Optional
-from typing import Sequence
 from typing import TYPE_CHECKING
 from typing import TypedDict
 from typing import TypeVar
-from typing import Union
 from urllib.parse import urlparse
 
 import psutil
@@ -42,7 +39,6 @@ import app.state
 import app.usecases.performance
 import app.utils
 from app.constants import regexes
-from app.constants.gamemodes import GameMode
 from app.constants.gamemodes import GAMEMODE_REPR_LIST
 from app.constants.mods import Mods
 from app.constants.mods import SPEED_CHANGING_MODS
@@ -70,6 +66,9 @@ if TYPE_CHECKING:
     from app.objects.channel import Channel
 
 
+R = TypeVar("R")
+
+
 BEATMAPS_PATH = Path.cwd() / ".data/osu"
 
 
@@ -79,7 +78,7 @@ class Context:
     trigger: str
     args: Sequence[str]
 
-    recipient: Union[Channel, Player]
+    recipient: Channel | Player
 
 
 Callback = Callable[[Context], Awaitable[Optional[str]]]
@@ -90,7 +89,7 @@ class Command(NamedTuple):
     callback: Callback
     priv: Privileges
     hidden: bool
-    doc: Optional[str]
+    doc: str | None
 
 
 class CommandSet:
@@ -169,7 +168,7 @@ def command(
 
 
 @command(Privileges.UNRESTRICTED, aliases=["", "h"], hidden=True)
-async def _help(ctx: Context) -> Optional[str]:
+async def _help(ctx: Context) -> str | None:
     """Show all documented commands the player can access."""
     prefix = app.settings.COMMAND_PREFIX
     l = ["Individual commands", "-----------"]
@@ -191,7 +190,7 @@ async def _help(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.UNRESTRICTED)
-async def roll(ctx: Context) -> Optional[str]:
+async def roll(ctx: Context) -> str | None:
     """Roll an n-sided die where n is the number you write (100 default)."""
     if ctx.args and ctx.args[0].isdecimal():
         max_roll = min(int(ctx.args[0]), 0x7FFF)
@@ -206,7 +205,7 @@ async def roll(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.UNRESTRICTED, hidden=True)
-async def block(ctx: Context) -> Optional[str]:
+async def block(ctx: Context) -> str | None:
     """Block another user from communicating with you."""
     target = await app.state.sessions.players.from_cache_or_sql(name=" ".join(ctx.args))
 
@@ -227,7 +226,7 @@ async def block(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.UNRESTRICTED, hidden=True)
-async def unblock(ctx: Context) -> Optional[str]:
+async def unblock(ctx: Context) -> str | None:
     """Unblock another user from communicating with you."""
     target = await app.state.sessions.players.from_cache_or_sql(name=" ".join(ctx.args))
 
@@ -245,7 +244,7 @@ async def unblock(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.UNRESTRICTED)
-async def reconnect(ctx: Context) -> Optional[str]:
+async def reconnect(ctx: Context) -> str | None:
     """Disconnect and reconnect a given player (or self) to the server."""
     if ctx.args:
         # !reconnect <player>
@@ -265,7 +264,7 @@ async def reconnect(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.SUPPORTER)
-async def changename(ctx: Context) -> Optional[str]:
+async def changename(ctx: Context) -> str | None:
     """Change your username."""
     name = " ".join(ctx.args).strip()
 
@@ -293,7 +292,7 @@ async def changename(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.UNRESTRICTED, aliases=["bloodcat", "beatconnect", "chimu", "q"])
-async def maplink(ctx: Context) -> Optional[str]:
+async def maplink(ctx: Context) -> str | None:
     """Return a download link to the user's current map (situation dependant)."""
     bmap = None
 
@@ -317,7 +316,7 @@ async def maplink(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.UNRESTRICTED, aliases=["last", "r"])
-async def recent(ctx: Context) -> Optional[str]:
+async def recent(ctx: Context) -> str | None:
     """Show information about a player's most recent score."""
     if ctx.args:
         target = app.state.sessions.players.get(name=" ".join(ctx.args))
@@ -364,7 +363,7 @@ TOP_SCORE_FMTSTR = (
 
 
 @command(Privileges.UNRESTRICTED, hidden=True)
-async def top(ctx: Context) -> Optional[str]:
+async def top(ctx: Context) -> str | None:
     """Show information about a player's top 10 scores."""
     # !top <mode> (player)
     args_len = len(ctx.args)
@@ -397,17 +396,20 @@ async def top(ctx: Context) -> Optional[str]:
     # !top rx!std
     mode = GAMEMODE_REPR_LIST.index(ctx.args[0])
 
-    scores = await app.state.services.database.fetch_all(
-        "SELECT s.pp, b.artist, b.title, b.version, b.set_id map_set_id, b.id map_id "
-        "FROM scores s "
-        "LEFT JOIN maps b ON b.md5 = s.map_md5 "
-        "WHERE s.userid = :user_id "
-        "AND s.mode = :mode "
-        "AND s.status = 2 "
-        "AND b.status in (2, 3) "
-        "ORDER BY s.pp DESC LIMIT 10",
-        {"user_id": player.id, "mode": mode},
-    )
+    scores = [
+        dict(s._mapping)
+        for s in await app.state.services.database.fetch_all(
+            "SELECT s.pp, b.artist, b.title, b.version, b.set_id map_set_id, b.id map_id "
+            "FROM scores s "
+            "LEFT JOIN maps b ON b.md5 = s.map_md5 "
+            "WHERE s.userid = :user_id "
+            "AND s.mode = :mode "
+            "AND s.status = 2 "
+            "AND b.status in (2, 3) "
+            "ORDER BY s.pp DESC LIMIT 10",
+            {"user_id": player.id, "mode": mode},
+        )
+    ]
 
     if not scores:
         return "No scores"
@@ -431,7 +433,7 @@ class ParsingError(str):
 def parse__with__command_args(
     mode: int,
     args: Sequence[str],
-) -> Union[Mapping[str, Any], ParsingError]:
+) -> Mapping[str, Any] | ParsingError:
     """Parse arguments for the !with command."""
 
     # tried to balance complexity vs correctness for this function
@@ -478,7 +480,7 @@ def parse__with__command_args(
 
 
 @command(Privileges.UNRESTRICTED, aliases=["w"], hidden=True)
-async def _with(ctx: Context) -> Optional[str]:
+async def _with(ctx: Context) -> str | None:
     """Specify custom accuracy & mod combinations with `/np`."""
     if ctx.recipient is not app.state.sessions.bot:
         return "This command can only be used in DM with bot."
@@ -535,7 +537,7 @@ async def _with(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.UNRESTRICTED, aliases=["req"])
-async def request(ctx: Context) -> Optional[str]:
+async def request(ctx: Context) -> str | None:
     """Request a beatmap for nomination."""
     if ctx.args:
         return "Invalid syntax: !request"
@@ -559,7 +561,7 @@ async def request(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.UNRESTRICTED)
-async def apikey(ctx: Context) -> Optional[str]:
+async def apikey(ctx: Context) -> str | None:
     """Generate a new api key & assign it to the player."""
     if ctx.recipient is not app.state.sessions.bot:
         return f"Command only available in DMs with {app.state.sessions.bot.name}."
@@ -584,7 +586,7 @@ async def apikey(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.NOMINATOR, aliases=["reqs"], hidden=True)
-async def requests(ctx: Context) -> Optional[str]:
+async def requests(ctx: Context) -> str | None:
     """Check the nomination request queue."""
     if ctx.args:
         return "Invalid syntax: !requests"
@@ -623,7 +625,7 @@ def status_to_id(s: str) -> int:
 
 
 @command(Privileges.NOMINATOR)
-async def _map(ctx: Context) -> Optional[str]:
+async def _map(ctx: Context) -> str | None:
     """Changes the ranked status of the most recently /np'ed map."""
     if (
         len(ctx.args) != 2
@@ -702,7 +704,7 @@ ACTION_STRINGS = {
 
 
 @command(Privileges.MODERATOR, hidden=True)
-async def notes(ctx: Context) -> Optional[str]:
+async def notes(ctx: Context) -> str | None:
     """Retrieve the logs of a specified player by name."""
     if len(ctx.args) != 2 or not ctx.args[1].isdecimal():
         return "Invalid syntax: !notes <name> <days_back>"
@@ -745,7 +747,7 @@ async def notes(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.MODERATOR, hidden=True)
-async def addnote(ctx: Context) -> Optional[str]:
+async def addnote(ctx: Context) -> str | None:
     """Add a note to a specified player by name."""
     if len(ctx.args) < 2:
         return "Invalid syntax: !addnote <name> <note ...>"
@@ -782,7 +784,7 @@ SHORTHAND_REASONS = {
 
 
 @command(Privileges.MODERATOR, hidden=True)
-async def silence(ctx: Context) -> Optional[str]:
+async def silence(ctx: Context) -> str | None:
     """Silence a specified player with a specified duration & reason."""
     if len(ctx.args) < 3:
         return "Invalid syntax: !silence <name> <duration> <reason>"
@@ -808,7 +810,7 @@ async def silence(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.MODERATOR, hidden=True)
-async def unsilence(ctx: Context) -> Optional[str]:
+async def unsilence(ctx: Context) -> str | None:
     """Unsilence a specified player."""
     if len(ctx.args) < 2:
         return "Invalid syntax: !unsilence <name> <reason>"
@@ -836,7 +838,7 @@ async def unsilence(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.ADMINISTRATOR, aliases=["u"], hidden=True)
-async def user(ctx: Context) -> Optional[str]:
+async def user(ctx: Context) -> str | None:
     """Return general information about a given user."""
     if not ctx.args:
         # no username specified, use ctx.player
@@ -860,7 +862,11 @@ async def user(ctx: Context) -> Optional[str]:
     else:
         last_np = None
 
-    osu_version = player.client_details.osu_version.date if player.online else "Unknown"
+    if player.is_online and player.client_details is not None:
+        osu_version = player.client_details.osu_version.date
+    else:
+        osu_version = "Unknown"
+
     donator_info = (
         f"True (ends {timeago.format(player.donor_end)})"
         if player.priv & Privileges.DONATOR != 0
@@ -886,7 +892,7 @@ async def user(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.ADMINISTRATOR, hidden=True)
-async def restrict(ctx: Context) -> Optional[str]:
+async def restrict(ctx: Context) -> str | None:
     """Restrict a specified player's account, with a reason."""
     if len(ctx.args) < 2:
         return "Invalid syntax: !restrict <name> <reason>"
@@ -910,14 +916,14 @@ async def restrict(ctx: Context) -> Optional[str]:
     await target.restrict(admin=ctx.player, reason=reason)
 
     # refresh their client state
-    if target.online:
+    if target.is_online:
         target.logout()
 
     return f"{target} was restricted."
 
 
 @command(Privileges.ADMINISTRATOR, hidden=True)
-async def unrestrict(ctx: Context) -> Optional[str]:
+async def unrestrict(ctx: Context) -> str | None:
     """Unrestrict a specified player's account, with a reason."""
     if len(ctx.args) < 2:
         return "Invalid syntax: !unrestrict <name> <reason>"
@@ -941,14 +947,14 @@ async def unrestrict(ctx: Context) -> Optional[str]:
     await target.unrestrict(ctx.player, reason)
 
     # refresh their client state
-    if target.online:
+    if target.is_online:
         target.logout()
 
     return f"{target} was unrestricted."
 
 
 @command(Privileges.ADMINISTRATOR, hidden=True)
-async def alert(ctx: Context) -> Optional[str]:
+async def alert(ctx: Context) -> str | None:
     """Send a notification to all players."""
     if len(ctx.args) < 1:
         return "Invalid syntax: !alert <msg>"
@@ -960,7 +966,7 @@ async def alert(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.ADMINISTRATOR, aliases=["alertu"], hidden=True)
-async def alertuser(ctx: Context) -> Optional[str]:
+async def alertuser(ctx: Context) -> str | None:
     """Send a notification to a specified player by name."""
     if len(ctx.args) < 2:
         return "Invalid syntax: !alertu <name> <msg>"
@@ -979,7 +985,7 @@ async def alertuser(ctx: Context) -> Optional[str]:
 # than the c[e4].ppy.sh domains; it exists on bancho as a tournament
 # server switch mechanism, perhaps we could leverage this in the future.
 @command(Privileges.ADMINISTRATOR, hidden=True)
-async def switchserv(ctx: Context) -> Optional[str]:
+async def switchserv(ctx: Context) -> str | None:
     """Switch your client's internal endpoints to a specified IP address."""
     if len(ctx.args) != 1:
         return "Invalid syntax: !switch <endpoint>"
@@ -991,7 +997,7 @@ async def switchserv(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.ADMINISTRATOR, aliases=["restart"])
-async def shutdown(ctx: Context) -> Union[Optional[str], NoReturn]:
+async def shutdown(ctx: Context) -> str | None | NoReturn:
     """Gracefully shutdown the server."""
     if ctx.trigger == "restart":
         _signal = signal.SIGUSR1
@@ -1028,7 +1034,7 @@ async def shutdown(ctx: Context) -> Union[Optional[str], NoReturn]:
 
 
 @command(Privileges.DEVELOPER)
-async def stealth(ctx: Context) -> Optional[str]:
+async def stealth(ctx: Context) -> str | None:
     """Toggle the developer's stealth, allowing them to be hidden."""
     # NOTE: this command is a large work in progress and currently
     # half works; eventually it will be moved to the Admin level.
@@ -1038,7 +1044,7 @@ async def stealth(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.DEVELOPER)
-async def recalc(ctx: Context) -> Optional[str]:
+async def recalc(ctx: Context) -> str | None:
     """Recalculate pp for a given map, or all maps."""
     return (
         "Please use tools/recalc.py instead.\n"
@@ -1047,7 +1053,7 @@ async def recalc(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.DEVELOPER, hidden=True)
-async def debug(ctx: Context) -> Optional[str]:
+async def debug(ctx: Context) -> str | None:
     """Toggle the console's debug setting."""
     app.settings.DEBUG = not app.settings.DEBUG
     return f"Toggled {'on' if app.settings.DEBUG else 'off'}."
@@ -1071,7 +1077,7 @@ str_priv_dict = {
 
 
 @command(Privileges.DEVELOPER, hidden=True)
-async def addpriv(ctx: Context) -> Optional[str]:
+async def addpriv(ctx: Context) -> str | None:
     """Set privileges for a specified player (by name)."""
     if len(ctx.args) < 2:
         return "Invalid syntax: !addpriv <name> <role1 role2 role3 ...>"
@@ -1096,7 +1102,7 @@ async def addpriv(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.DEVELOPER, hidden=True)
-async def rmpriv(ctx: Context) -> Optional[str]:
+async def rmpriv(ctx: Context) -> str | None:
     """Set privileges for a specified player (by name)."""
     if len(ctx.args) < 2:
         return "Invalid syntax: !rmpriv <name> <role1 role2 role3 ...>"
@@ -1126,7 +1132,7 @@ async def rmpriv(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.DEVELOPER, hidden=True)
-async def givedonator(ctx: Context) -> Optional[str]:
+async def givedonator(ctx: Context) -> str | None:
     """Give donator status to a specified player for a specified duration."""
     if len(ctx.args) < 2:
         return "Invalid syntax: !givedonator <name> <duration>"
@@ -1156,7 +1162,7 @@ async def givedonator(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.DEVELOPER)
-async def wipemap(ctx: Context) -> Optional[str]:
+async def wipemap(ctx: Context) -> str | None:
     # (intentionally no docstring)
     if ctx.args:
         return "Invalid syntax: !wipemap"
@@ -1176,7 +1182,7 @@ async def wipemap(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.DEVELOPER, hidden=True)
-async def menu(ctx: Context) -> Optional[str]:
+async def menu(ctx: Context) -> str | None:
     """Temporary command to illustrate the menu option idea."""
     ctx.player.send_current_menu()
 
@@ -1184,7 +1190,7 @@ async def menu(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.DEVELOPER, aliases=["re"])
-async def reload(ctx: Context) -> Optional[str]:
+async def reload(ctx: Context) -> str | None:
     """Reload a python module."""
     if len(ctx.args) != 1:
         return "Invalid syntax: !reload <module>"
@@ -1211,7 +1217,7 @@ async def reload(ctx: Context) -> Optional[str]:
 
 
 @command(Privileges.UNRESTRICTED)
-async def server(ctx: Context) -> Optional[str]:
+async def server(ctx: Context) -> str | None:
     """Retrieve performance data about the server."""
 
     build_str = f"bancho.py v{app.settings.VERSION} ({app.settings.DOMAIN})"
@@ -1310,7 +1316,7 @@ if app.settings.DEVELOPER_MODE:
     }
 
     @command(Privileges.DEVELOPER)
-    async def py(ctx: Context) -> Optional[str]:
+    async def py(ctx: Context) -> str | None:
         """Allow for (async) access to the python interpreter."""
         # This can be very good for getting used to bancho.py's API; just look
         # around the codebase and find things to play with in your server.
@@ -1343,14 +1349,12 @@ if app.settings.DEVELOPER_MODE:
 # Most commands are open to player usage.
 """
 
-R = TypeVar("R", bound=Optional[str])
-
 
 def ensure_match(
-    f: Callable[[Context, Match], Awaitable[Optional[R]]],
-) -> Callable[[Context], Awaitable[Optional[R]]]:
+    f: Callable[[Context, Match], Awaitable[R | None]],
+) -> Callable[[Context], Awaitable[R | None]]:
     @wraps(f)
-    async def wrapper(ctx: Context) -> Optional[R]:
+    async def wrapper(ctx: Context) -> R | None:
         match = ctx.player.match
 
         # multi set is a bit of a special case,
@@ -1377,7 +1381,7 @@ def ensure_match(
 
 @mp_commands.add(Privileges.UNRESTRICTED, aliases=["h"])
 @ensure_match
-async def mp_help(ctx: Context, match: Match) -> Optional[str]:
+async def mp_help(ctx: Context, match: Match) -> str | None:
     """Show all documented multiplayer commands the player can access."""
     prefix = app.settings.COMMAND_PREFIX
     cmds = []
@@ -1394,7 +1398,7 @@ async def mp_help(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED, aliases=["st"])
 @ensure_match
-async def mp_start(ctx: Context, match: Match) -> Optional[str]:
+async def mp_start(ctx: Context, match: Match) -> str | None:
     """Start the current multiplayer match, with any players ready."""
     if len(ctx.args) > 1:
         return "Invalid syntax: !mp start <force/seconds>"
@@ -1478,7 +1482,7 @@ async def mp_start(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED, aliases=["a"])
 @ensure_match
-async def mp_abort(ctx: Context, match: Match) -> Optional[str]:
+async def mp_abort(ctx: Context, match: Match) -> str | None:
     """Abort the current in-progress multiplayer match."""
     if not match.in_progress:
         return "Abort what?"
@@ -1493,7 +1497,7 @@ async def mp_abort(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED)
 @ensure_match
-async def mp_map(ctx: Context, match: Match) -> Optional[str]:
+async def mp_map(ctx: Context, match: Match) -> str | None:
     """Set the current match's current map by id."""
     if len(ctx.args) != 1 or not ctx.args[0].isdecimal():
         return "Invalid syntax: !mp map <beatmapid>"
@@ -1519,7 +1523,7 @@ async def mp_map(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED)
 @ensure_match
-async def mp_mods(ctx: Context, match: Match) -> Optional[str]:
+async def mp_mods(ctx: Context, match: Match) -> str | None:
     """Set the current match's mods, from string form."""
     if len(ctx.args) != 1 or len(ctx.args[0]) % 2 != 0:
         return "Invalid syntax: !mp mods <mods>"
@@ -1547,7 +1551,7 @@ async def mp_mods(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED, aliases=["fm", "fmods"])
 @ensure_match
-async def mp_freemods(ctx: Context, match: Match) -> Optional[str]:
+async def mp_freemods(ctx: Context, match: Match) -> str | None:
     """Toggle freemods status for the match."""
     if len(ctx.args) != 1 or ctx.args[0] not in ("on", "off"):
         return "Invalid syntax: !mp freemods <on/off>"
@@ -1585,7 +1589,7 @@ async def mp_freemods(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED)
 @ensure_match
-async def mp_host(ctx: Context, match: Match) -> Optional[str]:
+async def mp_host(ctx: Context, match: Match) -> str | None:
     """Set the current match's current host by id."""
     if len(ctx.args) != 1:
         return "Invalid syntax: !mp host <name>"
@@ -1609,7 +1613,7 @@ async def mp_host(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED)
 @ensure_match
-async def mp_randpw(ctx: Context, match: Match) -> Optional[str]:
+async def mp_randpw(ctx: Context, match: Match) -> str | None:
     """Randomize the current match's password."""
     match.passwd = secrets.token_hex(8)
     return "Match password randomized."
@@ -1617,7 +1621,7 @@ async def mp_randpw(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED, aliases=["inv"])
 @ensure_match
-async def mp_invite(ctx: Context, match: Match) -> Optional[str]:
+async def mp_invite(ctx: Context, match: Match) -> str | None:
     """Invite a player to the current match by name."""
     if len(ctx.args) != 1:
         return "Invalid syntax: !mp invite <name>"
@@ -1638,7 +1642,7 @@ async def mp_invite(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED)
 @ensure_match
-async def mp_addref(ctx: Context, match: Match) -> Optional[str]:
+async def mp_addref(ctx: Context, match: Match) -> str | None:
     """Add a referee to the current match by name."""
     if len(ctx.args) != 1:
         return "Invalid syntax: !mp addref <name>"
@@ -1659,7 +1663,7 @@ async def mp_addref(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED)
 @ensure_match
-async def mp_rmref(ctx: Context, match: Match) -> Optional[str]:
+async def mp_rmref(ctx: Context, match: Match) -> str | None:
     """Remove a referee from the current match by name."""
     if len(ctx.args) != 1:
         return "Invalid syntax: !mp addref <name>"
@@ -1680,14 +1684,14 @@ async def mp_rmref(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED)
 @ensure_match
-async def mp_listref(ctx: Context, match: Match) -> Optional[str]:
+async def mp_listref(ctx: Context, match: Match) -> str | None:
     """List all referees from the current match."""
     return ", ".join(map(str, match.refs)) + "."
 
 
 @mp_commands.add(Privileges.UNRESTRICTED)
 @ensure_match
-async def mp_lock(ctx: Context, match: Match) -> Optional[str]:
+async def mp_lock(ctx: Context, match: Match) -> str | None:
     """Lock all unused slots in the current match."""
     for slot in match.slots:
         if slot.status == SlotStatus.open:
@@ -1699,7 +1703,7 @@ async def mp_lock(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED)
 @ensure_match
-async def mp_unlock(ctx: Context, match: Match) -> Optional[str]:
+async def mp_unlock(ctx: Context, match: Match) -> str | None:
     """Unlock locked slots in the current match."""
     for slot in match.slots:
         if slot.status == SlotStatus.locked:
@@ -1711,7 +1715,7 @@ async def mp_unlock(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED)
 @ensure_match
-async def mp_teams(ctx: Context, match: Match) -> Optional[str]:
+async def mp_teams(ctx: Context, match: Match) -> str | None:
     """Change the team type for the current match."""
     if len(ctx.args) != 1:
         return "Invalid syntax: !mp teams <type>"
@@ -1752,7 +1756,7 @@ async def mp_teams(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED, aliases=["cond"])
 @ensure_match
-async def mp_condition(ctx: Context, match: Match) -> Optional[str]:
+async def mp_condition(ctx: Context, match: Match) -> str | None:
     """Change the win condition for the match."""
     if len(ctx.args) != 1:
         return "Invalid syntax: !mp condition <type>"
@@ -1790,7 +1794,7 @@ async def mp_condition(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED, aliases=["autoref"])
 @ensure_match
-async def mp_scrim(ctx: Context, match: Match) -> Optional[str]:
+async def mp_scrim(ctx: Context, match: Match) -> str | None:
     """Start a scrim in the current match."""
     r_match = regexes.BEST_OF.fullmatch(ctx.args[0])
     if len(ctx.args) != 1 or not r_match:
@@ -1830,7 +1834,7 @@ async def mp_scrim(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED, aliases=["end"])
 @ensure_match
-async def mp_endscrim(ctx: Context, match: Match) -> Optional[str]:
+async def mp_endscrim(ctx: Context, match: Match) -> str | None:
     """End the current matches ongoing scrim."""
     if not match.is_scrimming:
         return "Not currently scrimming!"
@@ -1842,7 +1846,7 @@ async def mp_endscrim(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED, aliases=["rm"])
 @ensure_match
-async def mp_rematch(ctx: Context, match: Match) -> Optional[str]:
+async def mp_rematch(ctx: Context, match: Match) -> str | None:
     """Restart a scrim, or roll back previous match point."""
     if ctx.args:
         return "Invalid syntax: !mp rematch"
@@ -1879,7 +1883,7 @@ async def mp_rematch(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.ADMINISTRATOR, aliases=["f"], hidden=True)
 @ensure_match
-async def mp_force(ctx: Context, match: Match) -> Optional[str]:
+async def mp_force(ctx: Context, match: Match) -> str | None:
     """Force a player into the current match by name."""
     # NOTE: this overrides any limits such as silences or passwd.
     if len(ctx.args) != 1:
@@ -1898,7 +1902,7 @@ async def mp_force(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED, aliases=["lp"])
 @ensure_match
-async def mp_loadpool(ctx: Context, match: Match) -> Optional[str]:
+async def mp_loadpool(ctx: Context, match: Match) -> str | None:
     """Load a mappool into the current match."""
     if len(ctx.args) != 1:
         return "Invalid syntax: !mp loadpool <name>"
@@ -1921,7 +1925,7 @@ async def mp_loadpool(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED, aliases=["ulp"])
 @ensure_match
-async def mp_unloadpool(ctx: Context, match: Match) -> Optional[str]:
+async def mp_unloadpool(ctx: Context, match: Match) -> str | None:
     """Unload the current matches mappool."""
     if ctx.args:
         return "Invalid syntax: !mp unloadpool"
@@ -1938,7 +1942,7 @@ async def mp_unloadpool(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED)
 @ensure_match
-async def mp_ban(ctx: Context, match: Match) -> Optional[str]:
+async def mp_ban(ctx: Context, match: Match) -> str | None:
     """Ban a pick in the currently loaded mappool."""
     if len(ctx.args) != 1:
         return "Invalid syntax: !mp ban <pick>"
@@ -1969,7 +1973,7 @@ async def mp_ban(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED)
 @ensure_match
-async def mp_unban(ctx: Context, match: Match) -> Optional[str]:
+async def mp_unban(ctx: Context, match: Match) -> str | None:
     """Unban a pick in the currently loaded mappool."""
     if len(ctx.args) != 1:
         return "Invalid syntax: !mp unban <pick>"
@@ -2000,7 +2004,7 @@ async def mp_unban(ctx: Context, match: Match) -> Optional[str]:
 
 @mp_commands.add(Privileges.UNRESTRICTED)
 @ensure_match
-async def mp_pick(ctx: Context, match: Match) -> Optional[str]:
+async def mp_pick(ctx: Context, match: Match) -> str | None:
     """Pick a map from the currently loaded mappool."""
     if len(ctx.args) != 1:
         return "Invalid syntax: !mp pick <pick>"
@@ -2057,7 +2061,7 @@ async def mp_pick(ctx: Context, match: Match) -> Optional[str]:
 
 
 @pool_commands.add(Privileges.TOURNEY_MANAGER, aliases=["h"], hidden=True)
-async def pool_help(ctx: Context) -> Optional[str]:
+async def pool_help(ctx: Context) -> str | None:
     """Show all documented mappool commands the player can access."""
     prefix = app.settings.COMMAND_PREFIX
     cmds = []
@@ -2073,7 +2077,7 @@ async def pool_help(ctx: Context) -> Optional[str]:
 
 
 @pool_commands.add(Privileges.TOURNEY_MANAGER, aliases=["c"], hidden=True)
-async def pool_create(ctx: Context) -> Optional[str]:
+async def pool_create(ctx: Context) -> str | None:
     """Add a new mappool to the database."""
     if len(ctx.args) != 1:
         return "Invalid syntax: !pool create <name>"
@@ -2118,7 +2122,7 @@ async def pool_create(ctx: Context) -> Optional[str]:
 
 
 @pool_commands.add(Privileges.TOURNEY_MANAGER, aliases=["del", "d"], hidden=True)
-async def pool_delete(ctx: Context) -> Optional[str]:
+async def pool_delete(ctx: Context) -> str | None:
     """Remove a mappool from the database."""
     if len(ctx.args) != 1:
         return "Invalid syntax: !pool delete <name>"
@@ -2147,7 +2151,7 @@ async def pool_delete(ctx: Context) -> Optional[str]:
 
 
 @pool_commands.add(Privileges.TOURNEY_MANAGER, aliases=["a"], hidden=True)
-async def pool_add(ctx: Context) -> Optional[str]:
+async def pool_add(ctx: Context) -> str | None:
     """Add a new map to a mappool in the database."""
     if len(ctx.args) != 2:
         return "Invalid syntax: !pool add <name> <pick>"
@@ -2196,7 +2200,7 @@ async def pool_add(ctx: Context) -> Optional[str]:
 
 
 @pool_commands.add(Privileges.TOURNEY_MANAGER, aliases=["rm", "r"], hidden=True)
-async def pool_remove(ctx: Context) -> Optional[str]:
+async def pool_remove(ctx: Context) -> str | None:
     """Remove a map from a mappool in the database."""
     if len(ctx.args) != 2:
         return "Invalid syntax: !pool remove <name> <pick>"
@@ -2233,7 +2237,7 @@ async def pool_remove(ctx: Context) -> Optional[str]:
 
 
 @pool_commands.add(Privileges.TOURNEY_MANAGER, aliases=["l"], hidden=True)
-async def pool_list(ctx: Context) -> Optional[str]:
+async def pool_list(ctx: Context) -> str | None:
     """List all existing mappools information."""
     pools = app.state.sessions.pools
     if not pools:
@@ -2251,7 +2255,7 @@ async def pool_list(ctx: Context) -> Optional[str]:
 
 
 @pool_commands.add(Privileges.TOURNEY_MANAGER, aliases=["i"], hidden=True)
-async def pool_info(ctx: Context) -> Optional[str]:
+async def pool_info(ctx: Context) -> str | None:
     """Get all information for a specific mappool."""
     if len(ctx.args) != 1:
         return "Invalid syntax: !pool info <name>"
@@ -2269,7 +2273,7 @@ async def pool_info(ctx: Context) -> Optional[str]:
 
     for (mods, slot), bmap in sorted(
         pool.maps.items(),
-        key=lambda x: (Mods.to_string(x[0][0]), x[0][1]),
+        key=lambda x: (repr(x[0][0]), x[0][1]),
     ):
         l.append(f"{mods!r}{slot}: {bmap.embed}")
 
@@ -2283,7 +2287,7 @@ async def pool_info(ctx: Context) -> Optional[str]:
 
 
 @clan_commands.add(Privileges.UNRESTRICTED, aliases=["h"])
-async def clan_help(ctx: Context) -> Optional[str]:
+async def clan_help(ctx: Context) -> str | None:
     """Show all documented clan commands the player can access."""
     prefix = app.settings.COMMAND_PREFIX
     cmds = []
@@ -2299,7 +2303,7 @@ async def clan_help(ctx: Context) -> Optional[str]:
 
 
 @clan_commands.add(Privileges.UNRESTRICTED, aliases=["c"])
-async def clan_create(ctx: Context) -> Optional[str]:
+async def clan_create(ctx: Context) -> str | None:
     """Create a clan with a given tag & name."""
     if len(ctx.args) < 2:
         return "Invalid syntax: !clan create <tag> <name>"
@@ -2354,7 +2358,7 @@ async def clan_create(ctx: Context) -> Optional[str]:
     )
 
     # announce clan creation
-    announce_chan = app.state.sessions.channels["#announce"]
+    announce_chan = app.state.sessions.channels.get_by_name("#announce")
     if announce_chan:
         msg = f"\x01ACTION founded {clan!r}."
         announce_chan.send(msg, sender=ctx.player, to_self=True)
@@ -2363,7 +2367,7 @@ async def clan_create(ctx: Context) -> Optional[str]:
 
 
 @clan_commands.add(Privileges.UNRESTRICTED, aliases=["delete", "d"])
-async def clan_disband(ctx: Context) -> Optional[str]:
+async def clan_disband(ctx: Context) -> str | None:
     """Disband a clan (admins may disband others clans)."""
     if ctx.args:
         # disband a specified clan by tag
@@ -2394,7 +2398,7 @@ async def clan_disband(ctx: Context) -> Optional[str]:
             member.clan_priv = None
 
     # announce clan disbanding
-    announce_chan = app.state.sessions.channels["#announce"]
+    announce_chan = app.state.sessions.channels.get_by_name("#announce")
     if announce_chan:
         msg = f"\x01ACTION disbanded {clan!r}."
         announce_chan.send(msg, sender=ctx.player, to_self=True)
@@ -2403,7 +2407,7 @@ async def clan_disband(ctx: Context) -> Optional[str]:
 
 
 @clan_commands.add(Privileges.UNRESTRICTED, aliases=["i"])
-async def clan_info(ctx: Context) -> Optional[str]:
+async def clan_info(ctx: Context) -> str | None:
     """Lookup information of a clan by tag."""
     if not ctx.args:
         return "Invalid syntax: !clan info <tag>"
@@ -2439,7 +2443,7 @@ async def clan_leave(ctx: Context):
 
 
 @clan_commands.add(Privileges.UNRESTRICTED, aliases=["l"])
-async def clan_list(ctx: Context) -> Optional[str]:
+async def clan_list(ctx: Context) -> str | None:
     """List all existing clans' information."""
     if ctx.args:
         if len(ctx.args) != 1 or not ctx.args[0].isdecimal():
@@ -2462,15 +2466,15 @@ async def clan_list(ctx: Context) -> Optional[str]:
 
 
 class CommandResponse(TypedDict):
-    resp: Optional[str]
+    resp: str | None
     hidden: bool
 
 
 async def process_commands(
     player: Player,
-    target: Union[Channel, Player],
+    target: Channel | Player,
     msg: str,
-) -> Optional[CommandResponse]:
+) -> CommandResponse | None:
     # response is either a CommandResponse if we hit a command,
     # or simply False if we don't have any command hits.
     start_time = clock_ns()

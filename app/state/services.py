@@ -1,23 +1,21 @@
 from __future__ import annotations
 
-import asyncio
 import ipaddress
 import pickle
 import re
 import secrets
+from collections.abc import AsyncGenerator
+from collections.abc import Mapping
+from collections.abc import MutableMapping
 from pathlib import Path
-from typing import AsyncGenerator
-from typing import Mapping
-from typing import MutableMapping
-from typing import Optional
 from typing import TYPE_CHECKING
 from typing import TypedDict
 
-import aioredis
 import databases
 import datadog as datadog_module
 import datadog.threadstats.base as datadog_client
 import pymysql
+from redis import asyncio as aioredis
 
 import app.settings
 import app.state
@@ -44,7 +42,7 @@ http_client: aiohttp.ClientSession
 database = databases.Database(app.settings.DB_DSN)
 redis: aioredis.Redis = aioredis.from_url(app.settings.REDIS_DSN)
 
-datadog: Optional[datadog_client.ThreadStats] = None
+datadog: datadog_client.ThreadStats | None = None
 if str(app.settings.DATADOG_API_KEY) and str(app.settings.DATADOG_APP_KEY):
     datadog_module.initialize(
         api_key=str(app.settings.DATADOG_API_KEY),
@@ -53,8 +51,6 @@ if str(app.settings.DATADOG_API_KEY) and str(app.settings.DATADOG_APP_KEY):
     datadog = datadog_client.ThreadStats()
 
 ip_resolver: IPResolver
-
-housekeeping_tasks: list[asyncio.Task] = []
 
 """ session usecases """
 
@@ -133,29 +129,35 @@ class IPResolver:
 
 async def fetch_geoloc(
     ip: IPAddress,
-    headers: Optional[Mapping[str, str]] = None,
-) -> Optional[Geolocation]:
-    """Fetch geolocation data based on ip."""
-    geoloc = fetch_geoloc_cloudflare(ip, headers)
+    headers: Mapping[str, str] | None = None,
+) -> Geolocation | None:
+    """Attempt to fetch geolocation data by any means necessary."""
+    geoloc = None
+    if headers is not None:
+        geoloc = _fetch_geoloc_from_headers(headers)
 
     if geoloc is None:
-        geoloc = fetch_geoloc_nginx(ip, headers)
-
-    if geoloc is None:
-        geoloc = await fetch_geoloc_web(ip)
+        geoloc = await _fetch_geoloc_from_ip(ip)
 
     return geoloc
 
 
-def fetch_geoloc_cloudflare(
-    ip: IPAddress,
-    headers: Mapping[str, str],
-) -> Optional[Geolocation]:
-    """Fetch geolocation data based on ip (using cloudflare headers)."""
+def _fetch_geoloc_from_headers(headers: Mapping[str, str]) -> Geolocation | None:
+    """Attempt to fetch geolocation data from http headers."""
+    geoloc = __fetch_geoloc_cloudflare(headers)
+
+    if geoloc is None:
+        geoloc = __fetch_geoloc_nginx(headers)
+
+    return geoloc
+
+
+def __fetch_geoloc_cloudflare(headers: Mapping[str, str]) -> Geolocation | None:
+    """Attempt to fetch geolocation data from cloudflare headers."""
     if not all(
         key in headers for key in ("CF-IPCountry", "CF-IPLatitude", "CF-IPLongitude")
     ):
-        return
+        return None
 
     country_code = headers["CF-IPCountry"].lower()
     latitude = float(headers["CF-IPLatitude"])
@@ -171,15 +173,12 @@ def fetch_geoloc_cloudflare(
     }
 
 
-def fetch_geoloc_nginx(
-    ip: IPAddress,
-    headers: Mapping[str, str],
-) -> Optional[Geolocation]:
-    """Fetch geolocation data based on ip (using nginx headers)."""
+def __fetch_geoloc_nginx(headers: Mapping[str, str]) -> Geolocation | None:
+    """Attempt to fetch geolocation data from nginx headers."""
     if not all(
         key in headers for key in ("X-Country-Code", "X-Latitude", "X-Longitude")
     ):
-        return
+        return None
 
     country_code = headers["X-Country-Code"].lower()
     latitude = float(headers["X-Latitude"])
@@ -195,15 +194,16 @@ def fetch_geoloc_nginx(
     }
 
 
-async def fetch_geoloc_web(ip: IPAddress) -> Optional[Geolocation]:
+async def _fetch_geoloc_from_ip(ip: IPAddress) -> Geolocation | None:
     """Fetch geolocation data based on ip (using ip-api)."""
     if not ip.is_private:
         url = f"http://ip-api.com/line/{ip}"
     else:
         url = "http://ip-api.com/line/"
 
+    assert http_client is not None
     async with http_client.get(url) as resp:
-        if not resp or resp.status != 200:
+        if resp.status != 200:
             log("Failed to get geoloc data: request failed.", Ansi.LRED)
             return None
 
@@ -235,6 +235,7 @@ async def log_strange_occurrence(obj: object) -> None:
 
     if app.settings.AUTOMATICALLY_REPORT_PROBLEMS:
         # automatically reporting problems to cmyui's server
+        assert http_client is not None
         async with http_client.post(
             url="https://log.cmyui.xyz/",
             headers={
@@ -287,7 +288,10 @@ class Version:
     def __hash__(self) -> int:
         return self.as_tuple.__hash__()
 
-    def __eq__(self, other: Version) -> bool:
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Version):
+            return NotImplemented
+
         return self.as_tuple == other.as_tuple
 
     def __lt__(self, other: Version) -> bool:
@@ -307,7 +311,7 @@ class Version:
         return (self.major, self.minor, self.micro)
 
     @classmethod
-    def from_str(cls, s: str) -> Optional[Version]:
+    def from_str(cls, s: str) -> Version | None:
         split = s.split(".")
         if len(split) == 3:
             return cls(
@@ -340,6 +344,7 @@ async def _get_latest_dependency_versions() -> AsyncGenerator[
 
         # TODO: split up and do the requests asynchronously
         url = f"https://pypi.org/pypi/{dependency_name}/json"
+        assert http_client is not None
         async with http_client.get(url) as resp:
             json = await resp.json()
             if resp.status == 200 and json:
@@ -370,7 +375,7 @@ async def check_for_dependency_updates() -> None:
     if updates_available:
         log(
             "Python modules can be updated with "
-            "`python3.9 -m pip install -U <modules>`.",
+            "`python3.11 -m pip install -U <modules>`.",
             Ansi.LMAGENTA,
         )
 
@@ -378,7 +383,7 @@ async def check_for_dependency_updates() -> None:
 # sql migrations
 
 
-async def _get_current_sql_structure_version() -> Optional[Version]:
+async def _get_current_sql_structure_version() -> Version | None:
     """Get the last launched version of the server."""
     res = await app.state.services.database.fetch_one(
         "SELECT ver_major, ver_minor, ver_micro "
@@ -454,7 +459,7 @@ async def run_sql_migrations() -> None:
             try:
                 await db_conn.execute(query)
             except pymysql.err.MySQLError as exc:
-                log(f"Failed: {query}", Ansi.GRAY)  # type: ignore
+                log(f"Failed: {query}", Ansi.GRAY)
                 log(repr(exc))
                 log(
                     "SQL failed to update - unless you've been "
