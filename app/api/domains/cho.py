@@ -60,6 +60,7 @@ from app.objects.player import PresenceFilter
 from app.packets import BanchoPacketReader
 from app.packets import BasePacket
 from app.packets import ClientPackets
+from app.repositories import ingame_logins as logins_repo
 from app.repositories import mails as mails_repo
 from app.repositories import players as players_repo
 from app.state import services
@@ -83,7 +84,7 @@ router = APIRouter(tags=["Bancho API"])
 
 
 @router.get("/")
-async def bancho_http_handler():
+async def bancho_http_handler() -> Response:
     """Handle a request from a web browser."""
     new_line = "\n"
     matches = [m for m in app.state.sessions.matches if m is not None]
@@ -109,7 +110,7 @@ async def bancho_http_handler():
 
 
 @router.get("/online")
-async def bancho_view_online_users():
+async def bancho_view_online_users() -> Response:
     """see who's online"""
     new_line = "\n"
 
@@ -132,7 +133,7 @@ bots:
 
 
 @router.get("/matches")
-async def bancho_view_matches():
+async def bancho_view_matches() -> Response:
     """ongoing matches"""
     new_line = "\n"
 
@@ -173,7 +174,7 @@ async def bancho_handler(
     request: Request,
     osu_token: str | None = Header(None),
     user_agent: Literal["osu!"] = Header(...),
-):
+) -> Response:
     ip = app.state.services.ip_resolver.get_ip(request.headers)
 
     if osu_token is None:
@@ -578,22 +579,25 @@ async def login(
 
         allowed_client_versions = set()
 
-        async with services.http_client.get(
+        # TODO: put this behind a layer of abstraction
+        #       for better handling of the error cases
+        response = await services.http_client.get(
             OSU_API_V2_CHANGELOG_URL,
             params={"stream": osu_client_stream},
-        ) as resp:
-            for build in (await resp.json())["builds"]:
-                version = date(
-                    int(build["version"][0:4]),
-                    int(build["version"][4:6]),
-                    int(build["version"][6:8]),
-                )
-                allowed_client_versions.add(version)
+        )
+        response.raise_for_status()
+        for build in response.json()["builds"]:
+            version = date(
+                int(build["version"][0:4]),
+                int(build["version"][4:6]),
+                int(build["version"][6:8]),
+            )
+            allowed_client_versions.add(version)
 
-                if any(entry["major"] for entry in build["changelog_entries"]):
-                    # this build is a major iteration to the client
-                    # don't allow anything older than this
-                    break
+            if any(entry["major"] for entry in build["changelog_entries"]):
+                # this build is a major iteration to the client
+                # don't allow anything older than this
+                break
 
         if osu_version.date not in allowed_client_versions:
             return {
@@ -619,27 +623,23 @@ async def login(
 
     login_time = time.time()
 
-    # TODO: improve tournament client support
+    # disallow multiple sessions from a single user
+    # with the exception of tourney spectator clients
     player = app.state.sessions.players.get(name=login_data["username"])
-    if player:
-        # player is already logged in - allow this only for tournament clients
-
-        if not (osu_version.stream == "tourney" or player.tourney_client):
-            # neither session is a tournament client, disallow
-
-            if (login_time - player.last_recv_time) > 10:
-                # let this session overrule the existing one
-                # (this is made to help prevent user ghosting)
-                player.logout()
-            else:
-                # current session is still active, disallow
-                return {
-                    "osu_token": "user-ghosted",
-                    "response_body": (
-                        app.packets.user_id(-1)
-                        + app.packets.notification("User already logged in.")
-                    ),
-                }
+    if player and osu_version.stream != "tourney":
+        # check if the existing session is still active
+        if (login_time - player.last_recv_time) < 10:
+            return {
+                "osu_token": "user-already-logged-in",
+                "response_body": (
+                    app.packets.user_id(-1)
+                    + app.packets.notification("User already logged in.")
+                ),
+            }
+        else:
+            # session is not active; replace it
+            player.logout()
+            del player
 
     user_info = await players_repo.fetch_one(
         name=login_data["username"],
@@ -695,16 +695,11 @@ async def login(
 
     """ login credentials verified """
 
-    await db_conn.execute(
-        "INSERT INTO ingame_logins "
-        "(userid, ip, osu_ver, osu_stream, datetime) "
-        "VALUES (:id, :ip, :osu_ver, :osu_stream, NOW())",
-        {
-            "id": user_info["id"],
-            "ip": str(ip),
-            "osu_ver": osu_version.date,
-            "osu_stream": osu_version.stream,
-        },
+    await logins_repo.create(
+        user_id=user_info["id"],
+        ip=str(ip),
+        osu_ver=osu_version.date,
+        osu_stream=osu_version.stream,
     )
 
     await db_conn.execute(

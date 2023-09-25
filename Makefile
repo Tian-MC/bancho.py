@@ -2,7 +2,10 @@ shell:
 	pipenv shell
 
 test:
-	pipenv run pytest
+	pipenv run pytest -vv tests/
+
+test-dbg:
+	pipenv run pytest -vv --pdb tests/
 
 lint:
 	pipenv run pre-commit run --all-files
@@ -22,7 +25,7 @@ uninstall:
 
 update: # THIS WILL NOT RUN ON WINDOWS DUE TO UVLOOP; USE WSL
 	pipenv update --dev
-	# make test ; disabled as it fails for now
+	make test
 	pipenv requirements > requirements.txt
 	pipenv requirements --dev > requirements-dev.txt
 
