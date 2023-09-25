@@ -40,7 +40,7 @@ services:
     # we also have a public image: osuakatsuki/bancho.py:latest
     image: bancho:latest
     ports:
-      - ${APP_PORT:-${SERVER_PORT}}:${APP_PORT:-${SERVER_PORT}}
+      - ${APP_PORT}:${APP_PORT}
     depends_on:
       mysql:
         condition: service_healthy
