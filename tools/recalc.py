@@ -220,14 +220,14 @@ async def main(argv: Sequence[str] | None = None) -> int:
 
     parser.add_argument("-d", "--debug", action="store_true")
     parser.add_argument(
-        "--scores",
-        description="Recalculate scores",
+    "--scores",
+        help="Recalculate scores",
         action="store_true",
         default=True,
     )
     parser.add_argument(
         "--stats",
-        description="Recalculate stats",
+        help="Recalculate stats",
         action="store_true",
         default=True,
     )
